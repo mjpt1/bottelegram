@@ -156,6 +156,32 @@ async def get_users_by_status(status: str) -> List[Dict[str, Any]]:
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
+async def delete_content(content_id: int) -> bool:
+    """
+    یک محتوا را از دیتابیس حذف می‌کند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        cursor = await db.execute("DELETE FROM content WHERE id = ?", (content_id,))
+        await db.commit()
+        # rowcount will be 1 if a row was deleted, 0 otherwise.
+        return cursor.rowcount > 0
+
+async def update_content_field(content_id: int, field: str, value: Any) -> bool:
+    """
+    یک فیلد خاص از یک محتوا را به‌روزرسانی می‌کند.
+    """
+    # A simple whitelist of editable fields to prevent SQL injection
+    allowed_fields = ["title", "description"]
+    if field not in allowed_fields:
+        logger.error(f"Attempt to update a non-allowed field: {field}")
+        return False
+
+    sql = f"UPDATE content SET {field} = ? WHERE id = ?"
+    async with aiosqlite.connect(settings.database_path) as db:
+        cursor = await db.execute(sql, (value, content_id))
+        await db.commit()
+        return cursor.rowcount > 0
+
 async def get_all_approved_user_ids() -> List[int]:
     """
     شناسه کاربری تمام کاربران تایید شده و ادمین را برای ارسال پیام گروهی برمی‌گرداند.
@@ -216,6 +242,37 @@ async def get_categories(parent_id: Optional[int] = None) -> List[Dict[str, Any]
         cursor = await db.execute(sql, (parent_id,) if parent_id is not None else ())
         categories = await cursor.fetchall()
         return [dict(cat) for cat in categories]
+
+async def delete_category(category_id: int) -> bool:
+    """
+    یک دسته‌بندی را حذف می‌کند. به لطف ON DELETE CASCADE، تمام زیرمجموعه‌ها و محتوای آن نیز حذف می‌شوند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        cursor = await db.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+        await db.commit()
+        return cursor.rowcount > 0
+
+async def update_category_name(category_id: int, new_name: str) -> bool:
+    """
+    نام یک دسته‌بندی را به‌روزرسانی می‌کند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        try:
+            cursor = await db.execute("UPDATE categories SET name = ? WHERE id = ?", (new_name, category_id))
+            await db.commit()
+            return cursor.rowcount > 0
+        except aiosqlite.IntegrityError:
+            logger.warning(f"Category name '{new_name}' likely already exists.")
+            return False
+
+async def get_category_parent(category_id: int) -> Optional[int]:
+    """
+     شناسه والد یک دسته‌بندی را برمی‌گرداند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        cursor = await db.execute("SELECT parent_id FROM categories WHERE id = ?", (category_id,))
+        row = await cursor.fetchone()
+        return row[0] if row else None
 
 # --- Content Management Functions ---
 
@@ -363,3 +420,37 @@ async def close_ticket(ticket_id: int):
         await db.execute("UPDATE support_tickets SET status = 'closed' WHERE id = ?", (ticket_id,))
         await db.commit()
         logger.info(f"Closed ticket {ticket_id}.")
+
+async def get_ticket_messages(ticket_id: int) -> List[Dict[str, Any]]:
+    """
+    تمام پیام‌های یک تیکت خاص را برمی‌گرداند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT sender_id, message_text, timestamp FROM support_messages WHERE ticket_id = ? ORDER BY timestamp ASC",
+            (ticket_id,)
+        )
+        messages = await cursor.fetchall()
+        return [dict(msg) for msg in messages]
+
+async def search_users(query: str) -> List[Dict[str, Any]]:
+    """
+    کاربران را بر اساس شناسه کاربری یا نام جستجو می‌کند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+
+        # اگر کوئری یک عدد باشد، آن را به عنوان user_id جستجو کن
+        if query.isdigit():
+            cursor = await db.execute("SELECT * FROM users WHERE user_id = ?", (int(query),))
+        else:
+            # در غیر این صورت، نام و نام خانوادگی را جستجو کن
+            search_query = f"%{query}%"
+            cursor = await db.execute(
+                "SELECT * FROM users WHERE first_name LIKE ? OR last_name LIKE ?",
+                (search_query, search_query)
+            )
+
+        users = await cursor.fetchall()
+        return [dict(user) for user in users]

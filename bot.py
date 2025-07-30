@@ -79,6 +79,27 @@ class BroadcastForm(StatesGroup):
 class PremiumContentForm(StatesGroup):
     waiting_for_password = State()
 
+class SearchUserForm(StatesGroup):
+    waiting_for_query = State()
+
+class DeleteContentForm(StatesGroup):
+    waiting_for_category = State()
+    waiting_for_content = State()
+    waiting_for_confirmation = State()
+
+class EditContentForm(StatesGroup):
+    waiting_for_content_selection = State()
+    waiting_for_field_selection = State()
+    waiting_for_new_value = State()
+
+class EditCategoryForm(StatesGroup):
+    waiting_for_category = State()
+    waiting_for_new_name = State()
+
+class DeleteCategoryForm(StatesGroup):
+    waiting_for_category = State()
+    waiting_for_confirmation = State()
+
 # --- کیبوردهای Inline ---
 
 def get_admin_approval_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -112,7 +133,8 @@ def get_admin_users_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🚫 کاربران بلاک‌شده", callback_data="admin:users:list:blocked")
         ],
         [
-            InlineKeyboardButton(text="👑 ارتقا به ادمین", callback_data="admin:users:promote")
+            InlineKeyboardButton(text="👑 ارتقا به ادمین", callback_data="admin:users:promote"),
+            InlineKeyboardButton(text="🔎 جستجوی کاربر", callback_data="admin:users:search")
         ],
         [
             InlineKeyboardButton(text="⬅️ بازگشت به پنل", callback_data="admin:panel:main")
@@ -125,10 +147,11 @@ def get_admin_content_keyboard() -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(text="➕ افزودن محتوا", callback_data="admin:content:add:start"),
-            InlineKeyboardButton(text="✏️ ویرایش/حذف محتوا", callback_data="admin:content:edit:start")
+            InlineKeyboardButton(text="🗑 حذف محتوا", callback_data="admin:content:delete:start")
         ],
         [
-            InlineKeyboardButton(text="🗂 مدیریت دسته‌بندی‌ها", callback_data="admin:categories:menu")
+             InlineKeyboardButton(text="✏️ ویرایش محتوا", callback_data="admin:content:edit:start"),
+             InlineKeyboardButton(text="🗂 مدیریت دسته‌بندی‌ها", callback_data="admin:categories:menu")
         ],
         [
             InlineKeyboardButton(text="⬅️ بازگشت به پنل", callback_data="admin:panel:main")
@@ -140,10 +163,12 @@ def get_admin_categories_keyboard() -> InlineKeyboardMarkup:
     """کیبورد بخش مدیریت دسته‌بندی‌ها."""
     buttons = [
         [
-            InlineKeyboardButton(text="➕ افزودن دسته‌بندی اصلی", callback_data="admin:categories:add_main"),
+            InlineKeyboardButton(text="➕ افزودن دسته‌بندی", callback_data="admin:categories:add_main"),
+            InlineKeyboardButton(text="➕ افزودن زیرمجموعه", callback_data="admin:categories:add_sub"),
         ],
         [
-            InlineKeyboardButton(text="➕ افزودن زیرمجموعه", callback_data="admin:categories:add_sub"),
+            InlineKeyboardButton(text="✏️ ویرایش نام", callback_data="admin:categories:edit:start"),
+            InlineKeyboardButton(text="🗑 حذف دسته‌بندی", callback_data="admin:categories:delete:start"),
         ],
         [
             InlineKeyboardButton(text="⬅️ بازگشت به مدیریت محتوا", callback_data="admin:content:menu")
@@ -325,23 +350,100 @@ async def admin_users_menu_handler(query: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("admin:users:list:"))
 async def admin_list_users_handler(query: CallbackQuery):
-    """CB-Handler: نمایش لیست کاربران بر اساس وضعیت."""
+    """CB-Handler: نمایش لیست کاربران با دکمه‌های مدیریت فردی."""
     status = query.data.split(":")[-1]
-    await query.answer(f"در حال دریافت لیست کاربران {status}...")
+    await query.answer(f"در حال دریافت لیست کاربران '{status}'...")
 
     users = await db.get_users_by_status(status)
 
     if not users:
-        text = f"هیچ کاربری با وضعیت '{status}' یافت نشد."
-    else:
-        text = f"لیست کاربران با وضعیت '{status}':\n\n"
-        for user in users:
-            text += f"- {html.bold(user['first_name'])} {html.bold(user['last_name'])} (ID: {html.code(user['user_id'])})\n"
+        await query.message.edit_text(
+            f"هیچ کاربری با وضعیت '{status}' یافت نشد.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ بازگشت", callback_data="admin:users:menu")]
+            ])
+        )
+        return
 
-    back_button = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ بازگشت به مدیریت کاربران", callback_data="admin:users:menu")]
-    ])
-    await query.message.edit_text(text, reply_markup=back_button)
+    # حذف پیام قبلی (لیست) و ارسال پیام جدید
+    await query.message.delete()
+    await query.message.answer(f"لیست کاربران با وضعیت '{status}':")
+
+    for user in users:
+        user_info = f"👤 **{user['first_name']} {user['last_name']}**\n" \
+                    f"🆔 User ID: {html.code(user['user_id'])}"
+
+        buttons = []
+        if status == 'pending':
+            buttons.append(InlineKeyboardButton(text="✅ تأیید", callback_data=f"admin:approve:{user['user_id']}"))
+            buttons.append(InlineKeyboardButton(text="❌ رد", callback_data=f"admin:reject:{user['user_id']}"))
+            buttons.append(InlineKeyboardButton(text="🚫 بلاک", callback_data=f"admin:block:{user['user_id']}"))
+        elif status == 'blocked':
+            buttons.append(InlineKeyboardButton(text="✅ آنبلاک", callback_data=f"admin:approve:{user['user_id']}")) # Unblock sets status to 'approved'
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+        await query.message.answer(user_info, reply_markup=keyboard)
+
+    # ارسال یک پیام نهایی با دکمه بازگشت
+    await query.message.answer(
+        "پایان لیست.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ بازگشت به مدیریت کاربران", callback_data="admin:users:menu")]
+        ])
+    )
+
+
+@dp.callback_query(F.data == "admin:users:search")
+async def admin_search_user_start(query: CallbackQuery, state: FSMContext):
+    """شروع فرآیند جستجوی کاربر."""
+    await query.answer()
+    await state.set_state(SearchUserForm.waiting_for_query)
+    await query.message.edit_text("لطفاً نام یا شناسه عددی کاربری که می‌خواهید جستجو کنید را وارد نمایید:")
+
+@dp.message(SearchUserForm.waiting_for_query, F.text)
+async def admin_search_user_process(message: Message, state: FSMContext):
+    """پردازش کوئری جستجو و نمایش نتایج."""
+    await state.clear()
+    query = message.text
+    users = await db.search_users(query)
+
+    if not users:
+        await message.answer(
+            f"هیچ کاربری با مشخصات '{query}' یافت نشد.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ بازگشت", callback_data="admin:users:menu")]
+            ])
+        )
+        return
+
+    await message.answer(f"نتایج جستجو برای '{query}':")
+    for user in users:
+        user_info = f"👤 **{user['first_name']} {user['last_name']}**\n" \
+                    f"🆔 User ID: `{user['user_id']}`\n" \
+                    f"สถานะ: `{user['status']}`"
+
+        # نمایش دکمه‌های مدیریت بر اساس وضعیت کاربر
+        buttons = []
+        status = user['status']
+        user_id = user['user_id']
+        if status == 'pending':
+            buttons.append(InlineKeyboardButton(text="✅ تأیید", callback_data=f"admin:approve:{user_id}"))
+            buttons.append(InlineKeyboardButton(text="❌ رد", callback_data=f"admin:reject:{user_id}"))
+            buttons.append(InlineKeyboardButton(text="🚫 بلاک", callback_data=f"admin:block:{user_id}"))
+        elif status == 'blocked':
+            buttons.append(InlineKeyboardButton(text="✅ آنبلاک", callback_data=f"admin:approve:{user_id}"))
+        elif status == 'approved':
+             buttons.append(InlineKeyboardButton(text="🚫 بلاک", callback_data=f"admin:block:{user_id}"))
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+        await message.answer(user_info, reply_markup=keyboard)
+
+    await message.answer(
+        "پایان نتایج جستجو.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ بازگشت به مدیریت کاربران", callback_data="admin:users:menu")]
+        ])
+    )
 
 
 @dp.callback_query(F.data == "admin:users:promote")
@@ -573,6 +675,181 @@ async def content_add_confirm(query: CallbackQuery, state: FSMContext):
     await admin_panel_handler(query.message)
 
 
+# --- Delete Content FSM Handlers ---
+
+@dp.callback_query(F.data == "admin:content:delete:start")
+async def content_delete_start(query: CallbackQuery, state: FSMContext):
+    """شروع فرآیند حذف محتوا: انتخاب دسته‌بندی."""
+    await query.answer()
+    # این تابع از `browse_categories_handler` عمومی استفاده می‌کند
+    # با یک پیشوند callback_data متفاوت برای حالت حذف
+    await browse_categories_for_selection(
+        message=query.message,
+        state=state,
+        target_state=DeleteContentForm.waiting_for_category,
+        callback_prefix="content:delete:cat",
+        text="لطفاً دسته‌بندی محتوایی که می‌خواهید حذف کنید را انتخاب نمایید:"
+    )
+
+async def browse_categories_for_selection(message: Message, state: FSMContext, target_state: State, callback_prefix: str, text: str, parent_id: int = None, is_callback: bool = True):
+    """
+    تابع کمکی عمومی برای نمایش دسته‌بندی‌ها جهت انتخاب (برای حذف یا ویرایش).
+    """
+    categories = await db.get_categories(parent_id=parent_id)
+    buttons = []
+
+    # نمایش دسته‌بندی‌های فرزند
+    for cat in categories:
+        buttons.append([InlineKeyboardButton(text=f"📁 {cat['name']}", callback_data=f"{callback_prefix}:{cat['id']}")])
+
+    # نمایش محتوای موجود در این سطح
+    if parent_id:
+        content_items = await db.get_content_by_category(parent_id)
+        for item in content_items:
+            buttons.append([InlineKeyboardButton(text=f"📄 {item['title']}", callback_data=f"content:delete:select:{item['id']}")])
+
+    # دکمه بازگشت
+    # (منطق بازگشت به والد در اینجا برای سادگی پیاده‌سازی نشده است)
+    buttons.append([InlineKeyboardButton(text="❌ لغو و بازگشت", callback_data="admin:content:menu")])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.edit_text(text, reply_markup=keyboard)
+    await state.set_state(target_state)
+
+@dp.callback_query(DeleteContentForm.waiting_for_category, F.data.startswith("content:delete:cat:"))
+async def content_delete_cat_chosen(query: CallbackQuery, state: FSMContext):
+    """ادامه فرآیند حذف پس از انتخاب دسته‌بندی."""
+    await query.answer()
+    category_id = int(query.data.split(":")[-1])
+    await browse_categories_for_selection(
+        message=query.message,
+        state=state,
+        target_state=DeleteContentForm.waiting_for_category,
+        callback_prefix="content:delete:cat",
+        text="این زیرمجموعه یا محتوای مورد نظر برای حذف را انتخاب کنید:",
+        parent_id=category_id
+    )
+
+@dp.callback_query(DeleteContentForm.waiting_for_category, F.data.startswith("content:delete:select:"))
+async def content_delete_select(query: CallbackQuery, state: FSMContext):
+    """نمایش تاییدیه نهایی برای حذف محتوا."""
+    await query.answer()
+    content_id = int(query.data.split(":")[-1])
+    content = await db.get_content_details(content_id)
+
+    if not content:
+        await query.message.edit_text("خطا: محتوا یافت نشد.")
+        return
+
+    await state.update_data(content_id=content_id)
+    await state.set_state(DeleteContentForm.waiting_for_confirmation)
+
+    text = f"آیا از حذف محتوای زیر اطمینان دارید؟\n\n" \
+           f"**عنوان:** {content['title']}\n" \
+           f"**نوع:** {content['file_type']}"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ بله، حذف کن", callback_data="content:delete:confirm")],
+        [InlineKeyboardButton(text="❌ خیر، لغو", callback_data="admin:content:menu")]
+    ])
+    await query.message.edit_text(text, reply_markup=keyboard)
+
+@dp.callback_query(DeleteContentForm.waiting_for_confirmation, F.data == "content:delete:confirm")
+async def content_delete_confirm(query: CallbackQuery, state: FSMContext):
+    """حذف نهایی محتوا از دیتابیس."""
+    data = await state.get_data()
+    content_id = data['content_id']
+
+    success = await db.delete_content(content_id)
+
+    if success:
+        await query.message.edit_text("✅ محتوا با موفقیت حذف شد.")
+    else:
+        await query.message.edit_text("❌ خطایی در حذف محتوا رخ داد.")
+
+    await state.clear()
+    await query.message.answer("بازگشت به پنل...", reply_markup=get_admin_content_keyboard())
+
+
+# --- Edit Content FSM Handlers ---
+
+@dp.callback_query(F.data == "admin:content:edit:start")
+async def content_edit_start(query: CallbackQuery, state: FSMContext):
+    """شروع فرآیند ویرایش محتوا: انتخاب دسته‌بندی."""
+    await query.answer()
+    await browse_categories_for_selection(
+        message=query.message,
+        state=state,
+        target_state=EditContentForm.waiting_for_content_selection,
+        callback_prefix="content:edit:cat",
+        text="لطفاً دسته‌بندی محتوایی که می‌خواهید ویرایش کنید را انتخاب نمایید:"
+    )
+
+@dp.callback_query(EditContentForm.waiting_for_content_selection, F.data.startswith("content:edit:cat:"))
+async def content_edit_cat_chosen(query: CallbackQuery, state: FSMContext):
+    """ادامه فرآیند ویرایش پس از انتخاب دسته‌بندی."""
+    await query.answer()
+    category_id = int(query.data.split(":")[-1])
+    # Re-using the browse helper to show sub-items
+    await browse_categories_for_selection(
+        message=query.message,
+        state=state,
+        target_state=EditContentForm.waiting_for_content_selection,
+        callback_prefix="content:edit:cat",
+        text="این زیرمجموعه یا محتوای مورد نظر برای ویرایش را انتخاب کنید:",
+        parent_id=category_id
+    )
+
+@dp.callback_query(EditContentForm.waiting_for_content_selection, F.data.startswith("content:delete:select:"))
+async def content_edit_select(query: CallbackQuery, state: FSMContext):
+    """محتوا برای ویرایش انتخاب شد. نمایش فیلدهای قابل ویرایش."""
+    await query.answer()
+    content_id = int(query.data.replace("content:delete:select:", "content:edit:select:")) # Re-using callback data
+    content = await db.get_content_details(content_id)
+    if not content:
+        await query.message.edit_text("خطا: محتوا یافت نشد.")
+        return
+
+    await state.update_data(content_id=content_id, content_title=content['title'])
+    await state.set_state(EditContentForm.waiting_for_field_selection)
+
+    buttons = [
+        [InlineKeyboardButton(text="عنوان", callback_data="content:edit:field:title")],
+        [InlineKeyboardButton(text="توضیحات", callback_data="content:edit:field:description")],
+        [InlineKeyboardButton(text="❌ لغو", callback_data="admin:content:menu")]
+    ]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await query.message.edit_text(f"کدام فیلد از '{content['title']}' را می‌خواهید ویرایش کنید؟", reply_markup=keyboard)
+
+
+@dp.callback_query(EditContentForm.waiting_for_field_selection, F.data.startswith("content:edit:field:"))
+async def content_edit_field_chosen(query: CallbackQuery, state: FSMContext):
+    """فیلد برای ویرایش انتخاب شد. درخواست مقدار جدید."""
+    await query.answer()
+    field_to_edit = query.data.split(":")[-1]
+    await state.update_data(field_to_edit=field_to_edit)
+    await state.set_state(EditContentForm.waiting_for_new_value)
+    await query.message.edit_text(f"لطفاً مقدار جدید برای '{field_to_edit}' را وارد کنید:")
+
+@dp.message(EditContentForm.waiting_for_new_value, F.text)
+async def content_edit_process_new_value(message: Message, state: FSMContext):
+    """مقدار جدید را پردازش و در دیتابیس ذخیره می‌کند."""
+    data = await state.get_data()
+    content_id = data['content_id']
+    field = data['field_to_edit']
+    new_value = message.text
+
+    success = await db.update_content_field(content_id, field, new_value)
+
+    if success:
+        await message.answer(f"✅ فیلد '{field}' برای محتوای '{data['content_title']}' با موفقیت به‌روز شد.")
+    else:
+        await message.answer("❌ خطایی در به‌روزرسانی محتوا رخ داد.")
+
+    await state.clear()
+    await admin_content_menu_handler(message)
+
+
 # --- Category Management Handlers ---
 
 @dp.callback_query(F.data == "admin:categories:menu")
@@ -643,7 +920,87 @@ async def category_add_name_process(message: Message, state: FSMContext):
     await message.answer(
         "بازگشت به منوی مدیریت محتوا...",
     )
-    await admin_content_menu_handler(message)
+    # Since message is not a query, we need to call the handler that sends a new message
+    await admin_panel_handler(message)
+
+
+async def get_category_selection_keyboard(callback_prefix: str) -> InlineKeyboardMarkup:
+    """Helper to get a keyboard of all categories for selection."""
+    # This is a simplified version. A full implementation would show a navigable tree.
+    categories = await db.get_categories()
+    buttons = []
+    for cat in categories:
+        buttons.append([InlineKeyboardButton(text=f"📁 {cat['name']}", callback_data=f"{callback_prefix}:{cat['id']}")])
+        subs = await db.get_categories(parent_id=cat['id'])
+        for sub in subs:
+            buttons.append([InlineKeyboardButton(text=f"  - 📄 {sub['name']}", callback_data=f"{callback_prefix}:{sub['id']}")])
+
+    buttons.append([InlineKeyboardButton(text="❌ لغو", callback_data="admin:categories:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# --- Edit Category Handlers ---
+
+@dp.callback_query(F.data == "admin:categories:edit:start")
+async def category_edit_start(query: CallbackQuery, state: FSMContext):
+    """شروع فرآیند ویرایش نام دسته‌بندی."""
+    await query.answer()
+    await state.set_state(EditCategoryForm.waiting_for_category)
+    await query.message.edit_text("لطفاً دسته‌بندی مورد نظر برای ویرایش را انتخاب کنید:",
+                                reply_markup=await get_category_selection_keyboard("category:edit:select"))
+
+@dp.callback_query(EditCategoryForm.waiting_for_category, F.data.startswith("category:edit:select:"))
+async def category_edit_select(query: CallbackQuery, state: FSMContext):
+    category_id = int(query.data.split(":")[-1])
+    await state.set_state(EditCategoryForm.waiting_for_new_name)
+    await state.update_data(category_id=category_id)
+    await query.message.edit_text("لطفاً نام جدید را برای این دسته‌بندی وارد کنید:")
+
+@dp.message(EditCategoryForm.waiting_for_new_name, F.text)
+async def category_edit_process(message: Message, state: FSMContext):
+    data = await state.get_data()
+    category_id = data['category_id']
+    new_name = message.text
+    success = await db.update_category_name(category_id, new_name)
+    if success:
+        await message.answer("✅ نام دسته‌بندی با موفقیت تغییر کرد.")
+    else:
+        await message.answer("❌ خطا در تغییر نام (احتمالاً نام تکراری است).")
+    await state.clear()
+    await admin_categories_menu_handler(message)
+
+# --- Delete Category Handlers ---
+
+@dp.callback_query(F.data == "admin:categories:delete:start")
+async def category_delete_start(query: CallbackQuery, state: FSMContext):
+    """شروع فرآیند حذف دسته‌بندی."""
+    await query.answer()
+    await state.set_state(DeleteCategoryForm.waiting_for_category)
+    await query.message.edit_text("کدام دسته‌بندی را می‌خواهید حذف کنید؟\n\n"
+                                "**هشدار: با حذف یک دسته‌بندی، تمام زیرمجموعه‌ها و محتوای داخل آن نیز برای همیشه حذف خواهند شد.**",
+                                reply_markup=await get_category_selection_keyboard("category:delete:select"))
+
+@dp.callback_query(DeleteCategoryForm.waiting_for_category, F.data.startswith("category:delete:select:"))
+async def category_delete_select(query: CallbackQuery, state: FSMContext):
+    category_id = int(query.data.split(":")[-1])
+    await state.set_state(DeleteCategoryForm.waiting_for_confirmation)
+    await state.update_data(category_id=category_id)
+    await query.message.edit_text("**آیا از حذف این دسته‌بندی و تمام محتویات آن اطمینان کامل دارید؟ این عمل غیرقابل بازگشت است.**",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                    [InlineKeyboardButton(text="✅ بله، حذف کن", callback_data="category:delete:confirm")],
+                                    [InlineKeyboardButton(text="❌ خیر، لغو", callback_data="admin:categories:menu")]
+                                ]))
+
+@dp.callback_query(DeleteCategoryForm.waiting_for_confirmation, F.data == "category:delete:confirm")
+async def category_delete_confirm(query: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    category_id = data['category_id']
+    success = await db.delete_category(category_id)
+    if success:
+        await query.message.edit_text("✅ دسته‌بندی با موفقیت حذف شد.")
+    else:
+        await query.message.edit_text("❌ خطا در حذف دسته‌بندی.")
+    await state.clear()
+    await admin_categories_menu_handler(query)
 
 
 # --- Support System Handlers ---
@@ -682,8 +1039,12 @@ async def browse_categories_handler(message: Message, parent_id: int = None, is_
             buttons.append([InlineKeyboardButton(text=f"📄 {item['title']}", callback_data=f"user:view:content:{item['id']}")])
 
         # دکمه بازگشت به سطح بالاتر
-        # برای پیدا کردن والدِ والد، باید یک کوئری دیگر به دیتابیس بزنیم (برای سادگی فعلاً به منوی اصلی برمیگردد)
-        buttons.append([InlineKeyboardButton(text="⬅️ بازگشت به منوی اصلی", callback_data="user:browse:cat:root")])
+        parent_of_current = await db.get_category_parent(parent_id)
+        if parent_of_current is not None:
+            buttons.append([InlineKeyboardButton(text="⬅️ بازگشت به سطح قبل", callback_data=f"user:browse:cat:{parent_of_current}")])
+        else:
+            # اگر والد نداشت، یعنی در یک دسته‌بندی اصلی هستیم، پس به ریشه برمیگردیم
+            buttons.append([InlineKeyboardButton(text="⬅️ بازگشت به منوی اصلی", callback_data="user:browse:cat:root")])
 
     text = "لطفاً یک دسته‌بندی یا محتوا را انتخاب کنید:"
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -877,12 +1238,27 @@ async def admin_list_open_tickets(query: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("admin:support:reply:"))
 async def admin_reply_start(query: CallbackQuery, state: FSMContext):
-    """شروع فرآیند پاسخ به یک تیکت."""
+    """شروع فرآیند پاسخ به یک تیکت با نمایش تاریخچه."""
     ticket_id = int(query.data.split(":")[-1])
+
+    await query.answer("در حال دریافت تاریخچه تیکت...")
+
+    messages = await db.get_ticket_messages(ticket_id)
+    ticket_owner_id = await db.get_ticket_owner(ticket_id)
+
+    history_text = f"📜 **تاریخچه مکالمات تیکت #{ticket_id}**\n\n"
+    for msg in messages:
+        # Determine if the sender is an admin or the user
+        sender_label = "کاربر" if msg['sender_id'] == ticket_owner_id else "پشتیبانی"
+        history_text += f"**{sender_label}**: {html.quote(msg['message_text'])}\n"
+        history_text += f"_{msg['timestamp']}_\n---\n"
+
+    history_text += "\n**لطفاً پاسخ خود را ارسال کنید:**"
+
     await state.set_state(ReplyForm.waiting_for_reply)
     await state.update_data(ticket_id=ticket_id)
-    await query.answer()
-    await query.message.edit_text(f"در حال پاسخ به تیکت #{ticket_id}. لطفاً پیام خود را بنویسید:")
+
+    await query.message.edit_text(history_text)
 
 @dp.message(ReplyForm.waiting_for_reply, F.text)
 async def admin_reply_process(message: Message, state: FSMContext):
