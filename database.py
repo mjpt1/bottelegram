@@ -16,6 +16,8 @@ async def init_db():
     """
     try:
         async with aiosqlite.connect(settings.database_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON;")
+
             # ایجاد جدول کاربران
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -30,8 +32,67 @@ async def init_db():
                     join_date TEXT NOT NULL
                 )
             """)
-            # در آینده می‌توان جداول دیگر (محتوا، دسته‌بندی‌ها، لاگ‌ها و...) را نیز به همین شکل اضافه کرد
-            # CREATE TABLE IF NOT EXISTS content (...)
+
+            # جدول دسته‌بندی‌ها
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS categories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    parent_id INTEGER,
+                    FOREIGN KEY (parent_id) REFERENCES categories (id) ON DELETE CASCADE
+                )
+            """)
+
+            # جدول محتوا
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS content (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    file_id TEXT NOT NULL,
+                    file_type TEXT NOT NULL, -- e.g., 'photo', 'video', 'document'
+                    category_id INTEGER NOT NULL,
+                    is_premium INTEGER NOT NULL DEFAULT 0, -- 0 for false, 1 for true
+                    access_password_hash TEXT,
+                    added_date TEXT NOT NULL,
+                    FOREIGN KEY (category_id) REFERENCES categories (id) ON DELETE CASCADE
+                )
+            """)
+
+            # جدول دسترسی کاربر به محتوای خاص
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_content_access (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    content_id INTEGER NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
+                    FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE,
+                    UNIQUE(user_id, content_id)
+                )
+            """)
+
+            # جدول تیکت‌های پشتیبانی
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS support_tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open', -- 'open', 'closed'
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+                )
+            """)
+
+            # جدول پیام‌های پشتیبانی
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS support_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticket_id INTEGER NOT NULL,
+                    sender_id INTEGER NOT NULL, -- Can be a user or an admin
+                    message_text TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    FOREIGN KEY (ticket_id) REFERENCES support_tickets (id) ON DELETE CASCADE
+                )
+            """)
 
             await db.commit()
         logger.info("Database initialized successfully.")
@@ -125,3 +186,180 @@ async def get_stats() -> Dict[str, int]:
             stats[row[0]] = row[1]
             stats['total'] += row[1]
         return stats
+
+# --- Category Management Functions ---
+
+async def add_category(name: str, parent_id: Optional[int] = None) -> Optional[int]:
+    """
+    یک دسته‌بندی یا زیرمجموعه جدید اضافه می‌کند.
+    ID دسته‌بندی جدید را برمی‌گرداند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        try:
+            cursor = await db.execute(
+                "INSERT INTO categories (name, parent_id) VALUES (?, ?)",
+                (name, parent_id)
+            )
+            await db.commit()
+            return cursor.lastrowid
+        except aiosqlite.IntegrityError:
+            logger.warning(f"Category '{name}' already exists.")
+            return None
+
+async def get_categories(parent_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """
+    لیست دسته‌بندی‌ها (یا زیرمجموعه‌های یک دسته‌بندی) را برمی‌گرداند.
+    """
+    sql = "SELECT * FROM categories WHERE parent_id IS ?" if parent_id is not None else "SELECT * FROM categories WHERE parent_id IS NULL"
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(sql, (parent_id,) if parent_id is not None else ())
+        categories = await cursor.fetchall()
+        return [dict(cat) for cat in categories]
+
+# --- Content Management Functions ---
+
+async def add_content(data: Dict[str, Any]) -> Optional[int]:
+    """
+    یک محتوای جدید به دیتابیس اضافه می‌کند.
+    """
+    data['added_date'] = datetime.now().isoformat()
+    # اطمینان از اینکه کلیدهای اختیاری وجود دارند
+    data.setdefault('description', None)
+    data.setdefault('is_premium', 0)
+    data.setdefault('access_password_hash', None)
+
+    async with aiosqlite.connect(settings.database_path) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO content (title, description, file_id, file_type, category_id, is_premium, access_password_hash, added_date)
+            VALUES (:title, :description, :file_id, :file_type, :category_id, :is_premium, :access_password_hash, :added_date)
+            """,
+            data
+        )
+        await db.commit()
+        logger.info(f"Content '{data['title']}' added with ID: {cursor.lastrowid}")
+        return cursor.lastrowid
+
+async def get_content_by_category(category_id: int) -> List[Dict[str, Any]]:
+    """
+    تمام محتواهای یک دسته‌بندی خاص را برمی‌گرداند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT id, title, file_type FROM content WHERE category_id = ?", (category_id,))
+        content_list = await cursor.fetchall()
+        return [dict(item) for item in content_list]
+
+async def get_content_details(content_id: int) -> Optional[Dict[str, Any]]:
+    """
+    جزئیات کامل یک محتوا را بر اساس ID آن برمی‌گرداند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM content WHERE id = ?", (content_id,))
+        content = await cursor.fetchone()
+        return dict(content) if content else None
+
+async def assign_content_to_user(user_id: int, content_id: int) -> bool:
+    """
+    دسترسی یک محتوای خاص را به یک کاربر خاص می‌دهد.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        try:
+            await db.execute(
+                "INSERT INTO user_content_access (user_id, content_id) VALUES (?, ?)",
+                (user_id, content_id)
+            )
+            await db.commit()
+            logger.info(f"Assigned content {content_id} to user {user_id}.")
+            return True
+        except aiosqlite.IntegrityError:
+            logger.warning(f"Content {content_id} is already assigned to user {user_id}.")
+            return False
+
+async def check_user_content_access(user_id: int, content_id: int) -> bool:
+    """
+    بررسی می‌کند که آیا کاربر به محتوای خاصی دسترسی دارد یا خیر.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM user_content_access WHERE user_id = ? AND content_id = ?",
+            (user_id, content_id)
+        )
+        return await cursor.fetchone() is not None
+
+# --- Support Ticket Functions ---
+
+async def create_support_ticket(user_id: int, first_message: str) -> int:
+    """
+    یک تیکت پشتیبانی جدید برای کاربر ایجاد کرده و اولین پیام را ثبت می‌کند.
+    ID تیکت جدید را برمی‌گرداند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        now = datetime.now().isoformat()
+        # Create ticket
+        cursor = await db.execute(
+            "INSERT INTO support_tickets (user_id, status, created_at) VALUES (?, 'open', ?)",
+            (user_id, now)
+        )
+        ticket_id = cursor.lastrowid
+        # Add first message
+        await db.execute(
+            "INSERT INTO support_messages (ticket_id, sender_id, message_text, timestamp) VALUES (?, ?, ?, ?)",
+            (ticket_id, user_id, first_message, now)
+        )
+        await db.commit()
+        logger.info(f"Created new support ticket with ID {ticket_id} for user {user_id}.")
+        return ticket_id
+
+async def add_support_message(ticket_id: int, sender_id: int, message_text: str):
+    """
+    یک پیام جدید به تیکت پشتیبانی اضافه می‌کند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        await db.execute(
+            "INSERT INTO support_messages (ticket_id, sender_id, message_text, timestamp) VALUES (?, ?, ?, ?)",
+            (ticket_id, sender_id, message_text, datetime.now().isoformat())
+        )
+        await db.commit()
+        logger.info(f"Added message to ticket {ticket_id} from sender {sender_id}.")
+
+async def get_open_tickets() -> List[Dict[str, Any]]:
+    """
+    لیست تمام تیکت‌های باز را به همراه آخرین پیامشان برمی‌گرداند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        query = """
+            SELECT
+                t.id,
+                t.user_id,
+                u.first_name,
+                u.last_name,
+                (SELECT message_text FROM support_messages WHERE ticket_id = t.id ORDER BY timestamp ASC LIMIT 1) as first_message
+            FROM support_tickets t
+            JOIN users u ON t.user_id = u.user_id
+            WHERE t.status = 'open'
+        """
+        cursor = await db.execute(query)
+        tickets = await cursor.fetchall()
+        return [dict(ticket) for ticket in tickets]
+
+async def get_ticket_owner(ticket_id: int) -> Optional[int]:
+    """
+    صاحب (کاربر) یک تیکت را پیدا می‌کند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        cursor = await db.execute("SELECT user_id FROM support_tickets WHERE id = ?", (ticket_id,))
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+async def close_ticket(ticket_id: int):
+    """
+    وضعیت یک تیکت را به 'closed' تغییر می‌دهد.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        await db.execute("UPDATE support_tickets SET status = 'closed' WHERE id = ?", (ticket_id,))
+        await db.commit()
+        logger.info(f"Closed ticket {ticket_id}.")
