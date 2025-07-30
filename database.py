@@ -94,6 +94,17 @@ async def init_db():
                 )
             """)
 
+            # جدول لاگ فعالیت‌ها
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS activity_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    action TEXT NOT NULL,
+                    details TEXT,
+                    timestamp TEXT NOT NULL
+                )
+            """)
+
             await db.commit()
         logger.info("Database initialized successfully.")
     except Exception as e:
@@ -155,6 +166,22 @@ async def get_users_by_status(status: str) -> List[Dict[str, Any]]:
         cursor = await db.execute("SELECT user_id, first_name, last_name FROM users WHERE status = ?", (status,))
         users = await cursor.fetchall()
         return [dict(user) for user in users]
+
+# --- Activity Log Functions ---
+
+async def log_activity(user_id: int, action: str, details: Optional[str] = None):
+    """
+    یک فعالیت جدید را در لاگ ثبت می‌کند.
+    """
+    try:
+        async with aiosqlite.connect(settings.database_path) as db:
+            await db.execute(
+                "INSERT INTO activity_logs (user_id, action, details, timestamp) VALUES (?, ?, ?, ?)",
+                (user_id, action, details, datetime.now().isoformat())
+            )
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Failed to log activity for user {user_id}: {e}")
 
 async def delete_content(content_id: int) -> bool:
     """
@@ -433,6 +460,16 @@ async def get_ticket_messages(ticket_id: int) -> List[Dict[str, Any]]:
         )
         messages = await cursor.fetchall()
         return [dict(msg) for msg in messages]
+
+async def get_all_content() -> List[Dict[str, Any]]:
+    """
+    تمام محتواهای موجود در دیتابیس را برمی‌گرداند.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT id, title FROM content ORDER BY id DESC")
+        content_list = await cursor.fetchall()
+        return [dict(item) for item in content_list]
 
 async def search_users(query: str) -> List[Dict[str, Any]]:
     """

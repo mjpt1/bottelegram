@@ -100,6 +100,10 @@ class DeleteCategoryForm(StatesGroup):
     waiting_for_category = State()
     waiting_for_confirmation = State()
 
+class GrantAccessForm(StatesGroup):
+    waiting_for_user_query = State()
+    waiting_for_content_selection = State()
+
 # --- کیبوردهای Inline ---
 
 def get_admin_approval_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -152,6 +156,9 @@ def get_admin_content_keyboard() -> InlineKeyboardMarkup:
         [
              InlineKeyboardButton(text="✏️ ویرایش محتوا", callback_data="admin:content:edit:start"),
              InlineKeyboardButton(text="🗂 مدیریت دسته‌بندی‌ها", callback_data="admin:categories:menu")
+        ],
+        [
+            InlineKeyboardButton(text="🔑 اعطای دسترسی به محتوا", callback_data="admin:content:grant_access")
         ],
         [
             InlineKeyboardButton(text="⬅️ بازگشت به پنل", callback_data="admin:panel:main")
@@ -296,6 +303,7 @@ async def process_wallet_address(message: Message, state: FSMContext):
         except Exception as e:
             logger.error(f"Failed to send notification to admin {admin_id}: {e}")
 
+    await db.log_activity(message.from_user.id, "registration_complete")
     await state.clear()
 
 # --- Handlers ادمین ---
@@ -666,6 +674,7 @@ async def content_add_confirm(query: CallbackQuery, state: FSMContext):
     content_id = await db.add_content(content_data)
 
     if content_id:
+        await db.log_activity(query.from_user.id, "content_add", f"Added content '{content_data['title']}' with ID {content_id}")
         await query.message.edit_text(f"✅ محتوای '{content_data['title']}' با موفقیت اضافه شد.")
     else:
         await query.message.edit_text("❌ خطایی در افزودن محتوا رخ داد. لطفاً دوباره تلاش کنید.")
@@ -763,6 +772,7 @@ async def content_delete_confirm(query: CallbackQuery, state: FSMContext):
     success = await db.delete_content(content_id)
 
     if success:
+        await db.log_activity(query.from_user.id, "content_delete", f"Deleted content ID {content_id}")
         await query.message.edit_text("✅ محتوا با موفقیت حذف شد.")
     else:
         await query.message.edit_text("❌ خطایی در حذف محتوا رخ داد.")
@@ -842,6 +852,7 @@ async def content_edit_process_new_value(message: Message, state: FSMContext):
     success = await db.update_content_field(content_id, field, new_value)
 
     if success:
+        await db.log_activity(message.from_user.id, "content_edit", f"Edited field '{field}' for content ID {content_id}")
         await message.answer(f"✅ فیلد '{field}' برای محتوای '{data['content_title']}' با موفقیت به‌روز شد.")
     else:
         await message.answer("❌ خطایی در به‌روزرسانی محتوا رخ داد.")
@@ -1003,6 +1014,62 @@ async def category_delete_confirm(query: CallbackQuery, state: FSMContext):
     await admin_categories_menu_handler(query)
 
 
+# --- Grant Access Handlers ---
+
+@dp.callback_query(F.data == "admin:content:grant_access")
+async def grant_access_start(query: CallbackQuery, state: FSMContext):
+    """شروع فرآیند اعطای دسترسی به محتوا."""
+    await query.answer()
+    await state.set_state(GrantAccessForm.waiting_for_user_query)
+    await query.message.edit_text("لطفاً نام یا شناسه کاربری که می‌خواهید به او دسترسی دهید را وارد کنید:")
+
+@dp.message(GrantAccessForm.waiting_for_user_query, F.text)
+async def grant_access_user_selected(message: Message, state: FSMContext):
+    """کاربر برای اعطای دسترسی انتخاب شد، اکنون لیست محتوا را نمایش بده."""
+    users = await db.search_users(message.text)
+    if not users:
+        await message.answer("کاربری با این مشخصات یافت نشد. لطفاً دوباره تلاش کنید.")
+        return
+    if len(users) > 1:
+        await message.answer("چندین کاربر با این مشخصات یافت شد. لطفاً شناسه عددی کاربر را وارد کنید.")
+        return
+
+    user = users[0]
+    await state.update_data(target_user_id=user['user_id'])
+
+    # For simplicity, we list ALL content. A better implementation might filter by premium.
+    all_content = await db.get_all_content() # This function needs to be added to db
+    if not all_content:
+        await message.answer("هیچ محتوایی برای اعطای دسترسی وجود ندارد.")
+        await state.clear()
+        return
+
+    buttons = [
+        [InlineKeyboardButton(text=f"📄 {c['title']}", callback_data=f"grant:content:{c['id']}")] for c in all_content
+    ]
+    await state.set_state(GrantAccessForm.waiting_for_content_selection)
+    await message.answer(f"به کدام محتوا برای کاربر **{user['first_name']}** دسترسی می‌دهید؟",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@dp.callback_query(GrantAccessForm.waiting_for_content_selection, F.data.startswith("grant:content:"))
+async def grant_access_process(query: CallbackQuery, state: FSMContext):
+    """پردازش نهایی اعطای دسترسی."""
+    await query.answer()
+    content_id = int(query.data.split(":")[-1])
+    data = await state.get_data()
+    user_id = data['target_user_id']
+
+    success = await db.assign_content_to_user(user_id, content_id)
+    if success:
+        await db.log_activity(query.from_user.id, "grant_access", f"Granted content {content_id} to user {user_id}")
+        await query.message.edit_text("✅ دسترسی با موفقیت اعطا شد.")
+    else:
+        await query.message.edit_text("❌ خطا در اعطای دسترسی (ممکن است کاربر از قبل دسترسی داشته باشد).")
+
+    await state.clear()
+
+
 # --- Support System Handlers ---
 
 class IsApprovedUser(BaseFilter):
@@ -1092,6 +1159,7 @@ async def user_view_content_callback(query: CallbackQuery, state: FSMContext):
 
     if has_access:
         await send_protected_content(query.from_user.id, content)
+        await db.log_activity(query.from_user.id, "view_content", f"Viewed content ID {content_id}: {content['title']}")
     else:
         await query.message.answer("شما به این محتوا دسترسی ندارید.")
 
@@ -1334,6 +1402,7 @@ async def admin_user_action_handler(query: CallbackQuery):
 
     if new_status:
         await db.update_user_status(user_id, new_status)
+        await db.log_activity(query.from_user.id, f"user_status_change", f"Changed user {user_id} to {new_status}")
 
         # ویرایش پیام ادمین و حذف دکمه‌ها
         admin_feedback = f"کاربر با شناسه {user_id} با موفقیت {new_status} شد."
